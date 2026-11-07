@@ -1,15 +1,12 @@
 /**
- * 通用苹果CMS(MacCMS v10)采集 —— Rex 完整版(列表浏览 + 片源播放) v2.1
+ * 通用苹果CMS(MacCMS v10)采集 —— Rex 完整版(列表浏览 + 片源播放) v2.2
  *
- * 包含：
- *   - 最新更新(catalog 列表)：可在「首页配置」里加一行浏览
- *   - 搜索
- *   - 详情/分集 + 线路解析(stream loadResource)
+ * v2.2 修复：Rex 的 Widget.http.get 可能把响应 JSON 自动解析成对象，
+ *           旧版 String(resp.data) 会得到 "[object Object]" 导致列表为空。
+ *           现在 fetchText/normalizeList 同时兼容「字符串」和「已解析对象」。
  *
+ * 包含：最新更新(catalog 列表) + 搜索 + 详情/分集 + 线路解析(stream)
  * ★ 必须用「网址」导入（本地文件导入没有脚本来源，播放会报“缺少脚本来源信息”）。
- * ★ 采集站接口在国内可能直连不畅，浏览空白/黑屏时先挂代理或换接口。
- *
- * 采集接口（模块设置可改）：http://cj.lziapi.com/api.php/provide/vod/from/lzm3u8/
  */
 
 var WidgetMetadata = {
@@ -18,7 +15,7 @@ var WidgetMetadata = {
   description: "苹果CMS采集：最新更新浏览 + 搜索 + 线路播放(m3u8)",
   author: "YG",
   site: "",
-  version: "2.1.0",
+  version: "2.2.0",
   requiredVersion: "0.0.1",
   globalParams: [
     { name: "api", title: "采集接口地址", type: "input", value: "http://cj.lziapi.com/api.php/provide/vod/from/lzm3u8/" }
@@ -70,10 +67,14 @@ function buildUrl(base, query) {
   if (!q) return base;
   return base + (base.indexOf("?") >= 0 ? "&" : "?") + q;
 }
-async function fetchText(url) {
-  var resp = await Widget.http.get(url, { headers: { "User-Agent": UA, "Accept": "*/*" } });
-  return resp && resp.data != null ? String(resp.data) : "";
+
+// 兼容：resp.data 可能是字符串，也可能是 Rex 已解析好的对象
+async function fetchData(url) {
+  var resp = await Widget.http.get(url, { headers: { "User-Agent": UA, "Accept": "*/*" }, allow_redirects: true });
+  var d = resp && resp.data != null ? resp.data : "";
+  return d;
 }
+
 function stripTags(s) { return String(s == null ? "" : s).replace(/<[^>]+>/g, "").replace(/\s+/g, " ").trim(); }
 function cdata(s) { return String(s == null ? "" : s).replace(/<!\[CDATA\[/g, "").replace(/\]\]>/g, "").trim(); }
 function tag(block, name) { var m = block.match(new RegExp("<" + name + ">([\\s\\S]*?)<\\/" + name + ">")); return m ? cdata(m[1]) : ""; }
@@ -98,14 +99,22 @@ function parsePlayUrl(playUrl, playFrom) {
   return out;
 }
 
-function normalizeList(text) {
+function normalizeList(data) {
   var items = [];
-  var t = String(text || "").trim();
-  if (!t) return items;
-  if (t.charAt(0) === "{" || t.charAt(0) === "[") {
-    var obj = null;
-    try { obj = JSON.parse(t); } catch (e) { obj = null; }
-    var arr = obj ? (obj.list || (Array.isArray(obj) ? obj : [])) : [];
+  var obj = null;
+  var xml = "";
+  if (data && typeof data === "object") {
+    obj = data;
+  } else {
+    var t = String(data == null ? "" : data).trim();
+    if (!t) return items;
+    if (t.charAt(0) === "{" || t.charAt(0) === "[") {
+      try { obj = JSON.parse(t); } catch (e) { obj = null; }
+    }
+    if (!obj) xml = t;
+  }
+  if (obj) {
+    var arr = obj.list || (Array.isArray(obj) ? obj : []);
     for (var i = 0; i < arr.length; i++) {
       var v = arr[i];
       items.push({
@@ -122,7 +131,7 @@ function normalizeList(text) {
   }
   var re = /<video>([\s\S]*?)<\/video>/g;
   var m;
-  while ((m = re.exec(t)) !== null) {
+  while ((m = re.exec(xml)) !== null) {
     var b = m[1];
     var dl = b.match(/<dd[^>]*>([\s\S]*?)<\/dd>/);
     var flagM = b.match(/<dd[^>]*flag="([^"]*)"/);
@@ -169,8 +178,8 @@ async function loadList(params) {
   var base = getApi(params);
   var page = Number(params.page || 1);
   var url = buildUrl(base, { ac: "videolist", pg: page });
-  var text = await fetchText(url);
-  return normalizeList(text).map(toVideoItem);
+  var data = await fetchData(url);
+  return normalizeList(data).map(toVideoItem);
 }
 
 async function search(params) {
@@ -179,8 +188,8 @@ async function search(params) {
   var kw = params.keyword || params.wd || params.query || "";
   if (!kw) return [];
   var url = buildUrl(base, { ac: "videolist", wd: kw });
-  var text = await fetchText(url);
-  return normalizeList(text).map(toVideoItem);
+  var data = await fetchData(url);
+  return normalizeList(data).map(toVideoItem);
 }
 
 async function loadDetail(link) {
@@ -189,8 +198,8 @@ async function loadDetail(link) {
   if (!id) return null;
   var base = getStoredBase();
   var url = buildUrl(base, { ac: "detail", ids: id });
-  var text = await fetchText(url);
-  var list = normalizeList(text);
+  var data = await fetchData(url);
+  var list = normalizeList(data);
   return list.length ? toVideoItem(list[0]) : null;
 }
 
