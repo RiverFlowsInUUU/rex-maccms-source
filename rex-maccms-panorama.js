@@ -1,26 +1,27 @@
 /**
- * 全景聚合影视源 —— Rex 模块(自带列表 + 多站多线路播放) v1.0
+ * 全景影视源(多站) —— Rex 模块 v2.0
  *
- * 把多个苹果CMS采集站整合进【一个模块】：
- *   - "最新更新"：模块自带列表（可在首页配置里加一行，浏览即采集站内容）
- *   - 搜索：多站合并，标 [站名] 区分来源
- *   - 播放：同一部剧同一集，聚合多个采集站，给多条线路
+ * ★ 关键修正（对照真实能播模块 Jable/Javday 的结构）：
+ *   - 只声明「列表」模块，不声明 loadResource / stream
+ *   - 列表条目【不带 videoUrl】，只带 link（条目身份）
+ *   - 顶层 loadDetail(link) 去采集接口取详情，直接返回 videoUrl(+分集)
+ *   之前加了 loadResource(stream) 会触发 Rex 的“脚本解析”路径并报
+ *   “当前条目缺少脚本来源信息，无法解析播放地址”。
  *
- * ★ 必须用「网址」导入。Rex 官方 TMDB 首页只给元数据、不能挂第三方源，
- *   所以请用【本模块自己的列表/搜索】来浏览和播放。
+ * 用法：导入后，用本模块自己的「最新更新」列表 或 搜索 来浏览/播放。
+ *       (Rex 官方 TMDB 首页只给元数据，不能挂第三方源)
  */
 
 var WidgetMetadata = {
   id: "yg.maccms.panorama",
   title: "全景影视源(多站)",
-  description: "多采集站整合：自带列表浏览 + 搜索 + 多线路播放",
+  description: "多采集站整合：自带列表 + 搜索 + 直出播放地址",
   author: "YG",
   site: "",
-  version: "1.0.0",
+  version: "2.0.0",
   requiredVersion: "0.0.1",
   globalParams: [],
   modules: [
-    { id: "loadResource", title: "加载资源", functionName: "loadResource", type: "stream", params: [] },
     {
       id: "loadList",
       title: "最新更新(多站)",
@@ -112,8 +113,7 @@ function normalizeList(data) {
         content: stripTags(v.vod_content || v.des || ""),
         typeName: String(v.type_name || v.type || ""),
         playFrom: String(v.vod_play_from || ""),
-        playUrl: String(v.vod_play_url || ""),
-        time: String(v.vod_time || v.vod_time_add || "")
+        playUrl: String(v.vod_play_url || "")
       });
     }
     return items;
@@ -127,7 +127,7 @@ function normalizeList(data) {
     items.push({
       id: tag(b, "id"), name: tag(b, "name"), pic: tag(b, "pic"),
       content: tag(b, "des"), typeName: tag(b, "type"),
-      playFrom: flagM ? flagM[1] : "", playUrl: dl ? cdata(dl[1]) : "", time: tag(b, "last")
+      playFrom: flagM ? flagM[1] : "", playUrl: dl ? cdata(dl[1]) : ""
     });
   }
   return items;
@@ -139,79 +139,40 @@ function isTv(item) {
   return parsePlayUrl(item.playUrl, item.playFrom).length > 1;
 }
 
-function toVideoItem(item, siteIdx, siteName) {
-  var eps = parsePlayUrl(item.playUrl, item.playFrom);
+async function searchSite(site, kw) {
+  return normalizeList(await fetchData(buildUrl(site.api, { ac: "videolist", wd: kw })));
+}
+async function listSite(site, page) {
+  return normalizeList(await fetchData(buildUrl(site.api, { ac: "videolist", pg: page })));
+}
+async function detailSite(site, id) {
+  var list = normalizeList(await fetchData(buildUrl(site.api, { ac: "detail", ids: id })));
+  return list.length ? list[0] : null;
+}
+
+// 列表条目：不带 videoUrl，只带身份 link（type:"url" 才会触发 loadDetail）
+function toListItem(item, idx, siteName) {
   var tv = isTv(item);
-  var firstUrl = eps.length ? eps[0].url : "";
-  var vi = {
-    id: firstUrl || String(item.id || item.name || ""),
+  var key = idx + "|" + String(item.id || "");
+  return {
+    id: key,
     type: "url",
     title: siteName ? ("[" + siteName + "] " + item.name) : item.name,
     description: item.content,
     coverUrl: item.pic,
     posterPath: item.pic,
     mediaType: tv ? "tv" : "movie",
-    link: siteIdx + "|" + String(item.id || "")
+    link: key
   };
-  if (firstUrl) vi.videoUrl = firstUrl;
-  if (tv && eps.length > 0) {
-    vi.episodeItems = eps.map(function (e, i) {
-      return { id: e.url, type: "url", title: e.name || ("第" + (i + 1) + "集"), episode: i + 1, videoUrl: e.url, mediaType: "tv", link: siteIdx + "|" + String(item.id || "") };
-    });
-  }
-  return vi;
 }
 
-async function searchSite(site, kw) {
-  var url = buildUrl(site.api, { ac: "videolist", wd: kw });
-  return normalizeList(await fetchData(url));
-}
-async function listSite(site, page) {
-  var url = buildUrl(site.api, { ac: "videolist", pg: page });
-  return normalizeList(await fetchData(url));
-}
-async function detailSite(site, id) {
-  var url = buildUrl(site.api, { ac: "detail", ids: id });
-  var list = normalizeList(await fetchData(url));
-  return list.length ? list[0] : null;
-}
-
-function pickMatch(list, want) {
-  if (!list || !list.length) return null;
-  var w = String(want || "").replace(/\s+/g, "");
-  var best = null, bestScore = -1;
-  for (var i = 0; i < list.length; i++) {
-    var n = String(list[i].name || "").replace(/\s+/g, "");
-    if (!n) continue;
-    var score = 0;
-    if (n === w) score = 100;
-    else if (n.indexOf(w) >= 0) score = 80 - (n.length - w.length);
-    else if (w.indexOf(n) >= 0) score = 60 - (w.length - n.length);
-    else continue;
-    if (score > bestScore) { bestScore = score; best = list[i]; }
-  }
-  return best;
-}
-function pickEpisodeIndex(eps, params) {
-  var want = Number(params.episode || 0);
-  if (!want) {
-    var en = String(params.episodeName || "");
-    var m = en.match(/E(\d+)/i) || en.match(/第\s*(\d+)\s*集/);
-    if (m) want = Number(m[1]);
-  }
-  if (want > 0 && eps[want - 1]) return want - 1;
-  return -1;
-}
-
-// 列表：多站聚合（每站取前 count，按片名去重，优先保留有分集的）
+// 「最新更新(多站)」
 async function loadList(params) {
   params = params || {};
   var page = Number(params.page || 1);
   var perSite = Number(params.count || 24);
   var groups = await Promise.all(SITES.map(function (site, idx) {
-    return listSite(site, page).then(function (list) {
-      return { idx: idx, site: site, list: list.slice(0, perSite) };
-    }).catch(function () { return { idx: idx, site: site, list: [] }; });
+    return listSite(site, page).then(function (list) { return { idx: idx, list: list.slice(0, perSite) }; }).catch(function () { return { idx: idx, list: [] }; });
   }));
   var out = [], seen = {};
   for (var g = 0; g < groups.length; g++) {
@@ -220,24 +181,21 @@ async function loadList(params) {
       var it = grp.list[i];
       var key = String(it.name || "").replace(/\s+/g, "");
       if (!key || seen[key]) continue;
-      var eps = parsePlayUrl(it.playUrl, it.playFrom);
-      if (!eps.length) continue; // 没播放地址的跳过
+      if (!parsePlayUrl(it.playUrl, it.playFrom).length) continue;
       seen[key] = 1;
-      out.push(toVideoItem(it, grp.idx, null));
+      out.push(toListItem(it, grp.idx, null));
     }
   }
   return out;
 }
 
-// 搜索：多站合并，标站名（同名片多站都会出现，等于多源）
+// 搜索(多站)，标站名
 async function search(params) {
   params = params || {};
   var kw = params.keyword || params.wd || params.query || "";
   if (!kw) return [];
   var groups = await Promise.all(SITES.map(function (site, idx) {
-    return searchSite(site, kw).then(function (list) {
-      return { idx: idx, site: site, list: list.slice(0, 10) };
-    }).catch(function () { return { idx: idx, site: site, list: [] }; });
+    return searchSite(site, kw).then(function (list) { return { idx: idx, site: site, list: list.slice(0, 10) }; }).catch(function () { return { idx: idx, site: site, list: [] }; });
   }));
   var out = [];
   for (var g = 0; g < groups.length; g++) {
@@ -245,12 +203,13 @@ async function search(params) {
     for (var i = 0; i < grp.list.length; i++) {
       var it = grp.list[i];
       if (!parsePlayUrl(it.playUrl, it.playFrom).length) continue;
-      out.push(toVideoItem(it, grp.idx, grp.site.name));
+      out.push(toListItem(it, grp.idx, grp.site.name));
     }
   }
   return out;
 }
 
+// ★ 顶层详情：返回 videoUrl(+分集) —— 不经过 stream 模块
 async function loadDetail(link) {
   var s = String(link || "");
   var p = s.split("|");
@@ -260,52 +219,23 @@ async function loadDetail(link) {
   var site = SITES[idx];
   if (!site || !id) return null;
   var it = await detailSite(site, id);
-  return it ? toVideoItem(it, idx, null) : null;
-}
-
-// 起播/换源：多站聚合，返回多条线路
-async function loadResource(params) {
-  params = params || {};
-  var title = params.seriesName || params.title || "";
-  var lines = [], seen = {};
-  function add(name, desc, url) { if (url && !seen[url]) { seen[url] = 1; lines.push({ name: name, description: desc || "", url: url }); } }
-
-  // 若条目自带直链，先放一条
-  if (params.videoUrl) add("本条目", "", params.videoUrl);
-
-  // 若 link 是 idx|id，先取该站该集
-  var s = String(params.link || "");
-  if (/^\d+\|/.test(s)) {
-    try {
-      var p = s.split("|");
-      var site0 = SITES[Number(p[0])];
-      if (site0) {
-        var it = await detailSite(site0, p[1]);
-        if (it) {
-          var eps0 = parsePlayUrl(it.playUrl, it.playFrom);
-          var i0 = pickEpisodeIndex(eps0, params);
-          if (i0 < 0) i0 = 0;
-          if (eps0[i0]) add(site0.name, eps0[i0].name, eps0[i0].url);
-          if (!title) title = it.name;
-        }
-      }
-    } catch (e) {}
+  if (!it) return null;
+  var eps = parsePlayUrl(it.playUrl, it.playFrom);
+  var tv = isTv(it);
+  var vi = {
+    id: s,
+    type: "url",
+    title: it.name,
+    description: it.content,
+    coverUrl: it.pic,
+    posterPath: it.pic,
+    mediaType: tv ? "tv" : "movie"
+  };
+  if (eps.length) vi.videoUrl = eps[0].url;
+  if (tv && eps.length > 1) {
+    vi.episodeItems = eps.map(function (e, i) {
+      return { id: e.url, type: "url", title: e.name || ("第" + (i + 1) + "集"), episode: i + 1, videoUrl: e.url, mediaType: "tv" };
+    });
   }
-
-  // 多站聚合同名剧当前集
-  if (title) {
-    var results = await Promise.all(SITES.map(function (site) {
-      return searchSite(site, title).then(function (list) {
-        var it = pickMatch(list, title);
-        if (!it) return null;
-        var eps = parsePlayUrl(it.playUrl, it.playFrom);
-        if (!eps.length) return null;
-        var idx = pickEpisodeIndex(eps, params);
-        if (idx < 0) idx = 0;
-        return { name: site.name, desc: eps[idx].name, url: eps[idx].url };
-      }).catch(function () { return null; });
-    }));
-    for (var i = 0; i < results.length; i++) { if (results[i]) add(results[i].name, results[i].desc, results[i].url); }
-  }
-  return lines;
+  return vi;
 }
